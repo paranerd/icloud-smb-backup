@@ -36,7 +36,7 @@ Rename `.env.example` to `.env` and fill in the details
 
 ## Enable
 
-Make the script files executable:
+Make the script file executable:
 
 ```bash
 chmod +x icloud_smb_backup.sh
@@ -81,3 +81,13 @@ Delete the `launchd` config:
 ```bash
 rm ~/Library/LaunchAgents/com.user.icloud_smb_backup.plist
 ```
+
+## Additional security
+
+The script checks for the `SMB_HOST` to be available via `ping`. To further validate the server get the SSH fingerprint:
+
+```bash
+ssh-keygen -lvf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+in the form of `SHA256:abcdef012...` and set it for `SERVER_FINGERPRINT` in `.env`

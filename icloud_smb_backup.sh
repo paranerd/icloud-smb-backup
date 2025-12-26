@@ -1,11 +1,17 @@
 #!/bin/bash
 
+# Get the absolute path of the directory where this script is located
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+
 # --- LOAD ENVIRONMENT VARIABLES ---
 # Load configuration from .env file if it exists
-if [ -f .env ]; then
+if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a
-    source .env
+    source "$SCRIPT_DIR/.env"
     set +a
+else
+    echo ".env file not found in $SCRIPT_DIR. Exiting."
+    exit 1
 fi
 
 # --- CONFIGURATION ---
@@ -29,6 +35,30 @@ LOGFILE="/tmp/icloud_smb_backup.log"
 STARTUP_SENTINEL="/tmp/icloud_smb_backup_startup_done"
 APP_NAME="iCloud SMB Backup"
 
+echo "" | tee -a "$LOGFILE"
+echo "iCloud Samba Backup started..." | tee -a "$LOGFILE"
+
+# --- PRE-CHECKS ---
+# Check if SMB host is reachable
+if ! ping -c 1 -W 1 "$SMB_HOST" &> /dev/null; then
+    # Quiet exit if NAS is not reachable (e.g., when you are away from home)
+    echo "SMB host $SMB_HOST not reachable. Exiting." | tee -a "$LOGFILE"
+    exit 0
+fi
+
+# Verify server fingerprint if provided
+if [[ -n "$SERVER_FINGERPRINT" ]]; then
+  echo "Checking server fingerprint..." | tee -a "$LOGFILE"
+
+  FINGERPRINT=$(ssh-keyscan -4 -T2 -t ed25519 "$SMB_HOST" 2>/dev/null | ssh-keygen -lf - | awk '{print $2}')
+
+  if [[ "$FINGERPRINT" != "$SERVER_FINGERPRINT" ]]; then
+    echo "Wrong server fingerprint. Aborting backup!" | tee -a "$LOGFILE"
+    osascript -e "display notification \"⚠️ Incorrect server fingerprint detected. Backup aborted!\" with title \"$APP_NAME\""
+    exit 1
+  fi
+fi
+
 # --- LOCK MECHANISM ---
 # Prevents multiple instances of the script from running simultaneously
 if [ -e "$LOCKFILE" ]; then exit 0; fi
@@ -37,26 +67,28 @@ trap "rm -f $LOCKFILE" EXIT
 
 # --- NETWORK STABILIZATION ---
 # Give the WiFi a few seconds to re-establish a connection after waking the Mac
+echo "Waiting $NETWORK_DELAY_SECONDS seconds for WiFi to stabilize..." | tee -a "$LOGFILE"
 sleep $NETWORK_DELAY_SECONDS
 
 # --- STARTUP DELAY (Only after fresh boot/login) ---
 # Check if the sentinel file exists in /tmp (cleared on reboot)
 if [ ! -f "$STARTUP_SENTINEL" ]; then
     touch "$STARTUP_SENTINEL"
-    echo "Fresh boot detected. Waiting an additional $DELAY_MINUTES minutes..." >> "$LOGFILE"
+    echo "Fresh boot detected. Waiting an additional $DELAY_MINUTES minutes..." | tee -a "$LOGFILE"
     sleep $((DELAY_MINUTES * 60))
 fi
 
 # --- LOG MANAGEMENT (Limit to ~1MB) ---
 # If log is larger than 1024 KB, it will be cleared with a timestamp
 if [ -f "$LOGFILE" ] && [ $(du -k "$LOGFILE" | cut -f1) -gt 1024 ]; then
-    echo "--- Log cleared due to size on $(date) ---" > "$LOGFILE"
+    echo "--- Log cleared due to size on $(date) ---" | tee "$LOGFILE"
 fi
 
 # --- MOUNT LOGIC ---
 # Check if the share is already mounted; if not, mount via AppleScript
 if ! mount | grep "on $MOUNT_POINT" > /dev/null; then
     # Uses native macOS mount system to leverage Keychain credentials
+    echo "Mounting SMB share $SMB_URL..." | tee -a "$LOGFILE"
     osascript -e "mount volume \"$SMB_URL\"" > /dev/null 2>&1
     sleep 5
 fi
@@ -71,17 +103,18 @@ if mount | grep "on $MOUNT_POINT" > /dev/null; then
     OFFLINE_FILES=$(find "$SOURCE" -name ".*.icloud" -type f | wc -l | xargs)
 
     if [ "$OFFLINE_FILES" -gt 0 ]; then
-        echo "WARNING: $OFFLINE_FILES files are cloud-only and won't be backed up!" >> "$LOGFILE"
+        echo "WARNING: $OFFLINE_FILES files are cloud-only and won't be backed up!" | tee -a "$LOGFILE"
         osascript -e "display notification \"⚠️ $OFFLINE_FILES files not downloaded. Backup incomplete!\" with title \"$APP_NAME\""
     fi
     
     # Run rsync with itemized changes (-i) and preserve timestamps/links
     # Note: --no-perms is used to avoid permission conflicts with SMB
+    echo "Starting rsync from $SOURCE to $DESTINATION..." | tee -a "$LOGFILE"
     SYNC_OUTPUT=$(rsync -ai --delete --no-perms --exclude '.DS_Store' "$SOURCE" "$DESTINATION" 2>&1)
     RSYNC_EXIT_CODE=$?
 
-    echo "--- Start: $TIMESTAMP ---" >> "$LOGFILE"
-    echo "$SYNC_OUTPUT" >> "$LOGFILE"
+    echo "--- Start: $TIMESTAMP ---" | tee -a "$LOGFILE"
+    echo "$SYNC_OUTPUT" | tee -a "$LOGFILE"
 
     if [ $RSYNC_EXIT_CODE -eq 0 ]; then
         # Only show notification if files were actually transferred
@@ -90,10 +123,10 @@ if mount | grep "on $MOUNT_POINT" > /dev/null; then
         fi
     else
         # Log error details and notify user
-        echo "Error details: $SYNC_OUTPUT" >> "$LOGFILE"
+        echo "Error details: $SYNC_OUTPUT" | tee -a "$LOGFILE"
         osascript -e "display notification \"⚠️ Sync error! Check log for details.\" with title \"$APP_NAME\""
     fi
 else
     # Quiet exit if NAS is not reachable (e.g., when you are away from home)
-    echo "$(date): SMB share not reachable or mount failed." >> "$LOGFILE"
+    echo "$(date): SMB share not reachable or mount failed." | tee -a "$LOGFILE"
 fi
